@@ -6,10 +6,16 @@ module Main where
 
 import Control.Concurrent
 import Control.Monad
+import Criterion.Main
 import System.Metrics.Distribution
 
 main :: IO ()
-main = do
+main = defaultMain [
+    bgroup "distribution" [ bench "1" $ nfIO distributionMain ]
+  ]
+
+distributionMain :: IO ()
+distributionMain = do
     distrib <- new
     locks <- replicateM n newEmptyMVar
     mapM_ (forkIO . work distrib iters) locks
