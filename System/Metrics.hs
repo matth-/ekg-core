@@ -122,14 +122,14 @@ type GroupId = Int
 
 -- | The 'Store' state.
 data State = State
-     { stateMetrics :: !(M.HashMap T.Text (Either MetricSampler GroupId))
+     { stateMetrics :: !(M.HashMap (T.Text, [T.Text]) (Either MetricSampler GroupId))
      , stateGroups  :: !(IM.IntMap GroupSampler)
      , stateNextId  :: {-# UNPACK #-} !Int
      }
 
 data GroupSampler = forall a. GroupSampler
      { groupSampleAction   :: !(IO a)
-     , groupSamplerMetrics :: !(M.HashMap T.Text (a -> Value))
+     , groupSamplerMetrics :: !(M.HashMap (T.Text, [T.Text]) (a -> Value))
      }
 
 -- TODO: Rename this to Metric and Metric to SampledMetric.
@@ -156,56 +156,56 @@ newStore = do
 -- | Register a non-negative, monotonically increasing, integer-valued
 -- metric. The provided action to read the value must be thread-safe.
 -- Also see 'createCounter'.
-registerCounter :: T.Text    -- ^ Counter name
+registerCounter :: (T.Text, [T.Text])    -- ^ Counter name and dimensions
                 -> IO Int64  -- ^ Action to read the current metric value
                 -> Store     -- ^ Metric store
                 -> IO ()
-registerCounter name sample store =
-    register name (CounterS sample) store
+registerCounter key sample store =
+    register key (CounterS sample) store
 
 -- | Register an integer-valued metric. The provided action to read
 -- the value must be thread-safe. Also see 'createGauge'.
-registerGauge :: T.Text    -- ^ Gauge name
+registerGauge :: (T.Text, [T.Text])    -- ^ Gauge name and dimensions
               -> IO Int64  -- ^ Action to read the current metric value
               -> Store     -- ^ Metric store
               -> IO ()
-registerGauge name sample store =
-    register name (GaugeS sample) store
+registerGauge key sample store =
+    register key (GaugeS sample) store
 
 -- | Register a text metric. The provided action to read the value
 -- must be thread-safe. Also see 'createLabel'.
-registerLabel :: T.Text     -- ^ Label name
+registerLabel :: (T.Text, [T.Text])     -- ^ Label name and dimensions
               -> IO T.Text  -- ^ Action to read the current metric value
               -> Store      -- ^ Metric store
               -> IO ()
-registerLabel name sample store =
-    register name (LabelS sample) store
+registerLabel key sample store =
+    register key (LabelS sample) store
 
 -- | Register a distribution metric. The provided action to read the
 -- value must be thread-safe. Also see 'createDistribution'.
 registerDistribution
-    :: T.Text                 -- ^ Distribution name
+    :: (T.Text, [T.Text])     -- ^ Distribution name and dimensions
     -> IO Distribution.Stats  -- ^ Action to read the current metric
                               -- value
     -> Store                  -- ^ Metric store
     -> IO ()
-registerDistribution name sample store =
-    register name (DistributionS sample) store
+registerDistribution key sample store =
+    register key (DistributionS sample) store
 
-register :: T.Text
+register :: (T.Text, [T.Text])
          -> MetricSampler
          -> Store
          -> IO ()
-register name sample store = do
+register key sample store = do
     atomicModifyIORef (storeState store) $ \ state@State{..} ->
-        case M.member name stateMetrics of
+        case M.member key stateMetrics of
             False -> let !state' = state {
-                               stateMetrics = M.insert name
+                               stateMetrics = M.insert key
                                               (Left sample)
                                               stateMetrics
                              }
                      in (state', ())
-            True  -> alreadyInUseError name
+            True  -> alreadyInUseError (fst key)
 
 -- | Raise an exception indicating that the metric name is already in
 -- use.
@@ -258,7 +258,7 @@ alreadyInUseError name =
 -- >             ]
 -- >     registerGroup (M.fromList metrics) getGCStats store
 registerGroup
-    :: M.HashMap T.Text
+    :: M.HashMap (T.Text,[T.Text])
        (a -> Value)  -- ^ Metric names and getter functions.
     -> IO a          -- ^ Action to sample the metric group
     -> Store         -- ^ Metric store
@@ -275,9 +275,12 @@ registerGroup getters cb store = do
                 }
        in (state', ())
   where
-    register_ groupId metrics name _ = case M.lookup name metrics of
-        Nothing -> M.insert name (Right groupId) metrics
-        Just _  -> alreadyInUseError name
+    register_ groupId metrics key _ = case M.lookup key metrics of
+        Nothing -> M.insert key (Right groupId) metrics
+        Just _  -> alreadyInUseError (fst key)
+
+noDims :: [T.Text]
+noDims = []
 
 ------------------------------------------------------------------------
 -- ** Convenience functions
@@ -293,7 +296,7 @@ createCounter :: T.Text  -- ^ Counter name
               -> IO Counter
 createCounter name store = do
     counter <- Counter.new
-    registerCounter name (Counter.read counter) store
+    registerCounter (name, noDims) (Counter.read counter) store
     return counter
 
 -- | Create and register a zero-initialized gauge.
@@ -302,7 +305,7 @@ createGauge :: T.Text  -- ^ Gauge name
             -> IO Gauge
 createGauge name store = do
     gauge <- Gauge.new
-    registerGauge name (Gauge.read gauge) store
+    registerGauge (name, noDims) (Gauge.read gauge) store
     return gauge
 
 -- | Create and register an empty label.
@@ -311,7 +314,7 @@ createLabel :: T.Text  -- ^ Label name
             -> IO Label
 createLabel name store = do
     label <- Label.new
-    registerLabel name (Label.read label) store
+    registerLabel (name, noDims) (Label.read label) store
     return label
 
 -- | Create and register an event tracker.
@@ -320,7 +323,7 @@ createDistribution :: T.Text  -- ^ Distribution name
                    -> IO Distribution
 createDistribution name store = do
     event <- Distribution.new
-    registerDistribution name (Distribution.read event) store
+    registerDistribution (name, noDims) (Distribution.read event) store
     return event
 
 ------------------------------------------------------------------------
@@ -411,25 +414,25 @@ registerGcMetrics :: Store -> IO ()
 registerGcMetrics store =
     registerGroup
     (M.fromList
-     [ ("rts.gc.bytes_allocated"          , Counter . Stats.bytesAllocated)
-     , ("rts.gc.num_gcs"                  , Counter . Stats.numGcs)
-     , ("rts.gc.num_bytes_usage_samples"  , Counter . Stats.numByteUsageSamples)
-     , ("rts.gc.cumulative_bytes_used"    , Counter . Stats.cumulativeBytesUsed)
-     , ("rts.gc.bytes_copied"             , Counter . Stats.bytesCopied)
-     , ("rts.gc.mutator_cpu_ms"           , Counter . toMs . Stats.mutatorCpuSeconds)
-     , ("rts.gc.mutator_wall_ms"          , Counter . toMs . Stats.mutatorWallSeconds)
-     , ("rts.gc.gc_cpu_ms"                , Counter . toMs . Stats.gcCpuSeconds)
-     , ("rts.gc.gc_wall_ms"               , Counter . toMs . Stats.gcWallSeconds)
-     , ("rts.gc.cpu_ms"                   , Counter . toMs . Stats.cpuSeconds)
-     , ("rts.gc.wall_ms"                  , Counter . toMs . Stats.wallSeconds)
-     , ("rts.gc.max_bytes_used"           , Gauge . Stats.maxBytesUsed)
-     , ("rts.gc.current_bytes_used"       , Gauge . Stats.currentBytesUsed)
-     , ("rts.gc.current_bytes_slop"       , Gauge . Stats.currentBytesSlop)
-     , ("rts.gc.max_bytes_slop"           , Gauge . Stats.maxBytesSlop)
-     , ("rts.gc.peak_megabytes_allocated" , Gauge . Stats.peakMegabytesAllocated)
-     , ("rts.gc.par_tot_bytes_copied"     , Gauge . gcParTotBytesCopied)
-     , ("rts.gc.par_avg_bytes_copied"     , Gauge . gcParTotBytesCopied)
-     , ("rts.gc.par_max_bytes_copied"     , Gauge . Stats.parMaxBytesCopied)
+     [ (("rts.gc.bytes_allocated", noDims)          , Counter . Stats.bytesAllocated)
+     , (("rts.gc.num_gcs", noDims)                  , Counter . Stats.numGcs)
+     , (("rts.gc.num_bytes_usage_samples", noDims)  , Counter . Stats.numByteUsageSamples)
+     , (("rts.gc.cumulative_bytes_used", noDims)    , Counter . Stats.cumulativeBytesUsed)
+     , (("rts.gc.bytes_copied", noDims)             , Counter . Stats.bytesCopied)
+     , (("rts.gc.mutator_cpu_ms", noDims)           , Counter . toMs . Stats.mutatorCpuSeconds)
+     , (("rts.gc.mutator_wall_ms", noDims)          , Counter . toMs . Stats.mutatorWallSeconds)
+     , (("rts.gc.gc_cpu_ms", noDims)                , Counter . toMs . Stats.gcCpuSeconds)
+     , (("rts.gc.gc_wall_ms", noDims)               , Counter . toMs . Stats.gcWallSeconds)
+     , (("rts.gc.cpu_ms", noDims)                   , Counter . toMs . Stats.cpuSeconds)
+     , (("rts.gc.wall_ms", noDims)                  , Counter . toMs . Stats.wallSeconds)
+     , (("rts.gc.max_bytes_used", noDims)           , Gauge . Stats.maxBytesUsed)
+     , (("rts.gc.current_bytes_used", noDims)       , Gauge . Stats.currentBytesUsed)
+     , (("rts.gc.current_bytes_slop", noDims)       , Gauge . Stats.currentBytesSlop)
+     , (("rts.gc.max_bytes_slop", noDims)           , Gauge . Stats.maxBytesSlop)
+     , (("rts.gc.peak_megabytes_allocated", noDims) , Gauge . Stats.peakMegabytesAllocated)
+     , (("rts.gc.par_tot_bytes_copied", noDims)     , Gauge . gcParTotBytesCopied)
+     , (("rts.gc.par_avg_bytes_copied", noDims)     , Gauge . gcParTotBytesCopied)
+     , (("rts.gc.par_max_bytes_copied", noDims)     , Gauge . Stats.parMaxBytesCopied)
      ])
     getGcStats
     store
@@ -512,11 +515,16 @@ gcParTotBytesCopied = Stats.parAvgBytesCopied
 -- metrics atomically.
 
 -- | A sample of some metrics.
-type Sample = M.HashMap T.Text Value
+type Sample = M.HashMap (T.Text,[T.Text]) Value
 
 -- | Sample all metrics. Sampling is /not/ atomic in the sense that
 -- some metrics might have been mutated before they're sampled but
 -- after some other metrics have already been sampled.
+--
+-- TODO(lucasdicioccio):
+-- - remove dimensional counters for backward compatibility
+-- - add a sampleAllIncludingDimensions function
+-- - add a deprecation warning for sampleAll
 sampleAll :: Store -> IO Sample
 sampleAll store = do
     state <- readIORef (storeState store)
@@ -528,13 +536,13 @@ sampleAll store = do
     return $! M.fromList allSamples
 
 -- | Sample all metric groups.
-sampleGroups :: [GroupSampler] -> IO [(T.Text, Value)]
+sampleGroups :: [GroupSampler] -> IO [((T.Text, [T.Text]), Value)]
 sampleGroups cbSamplers = concat `fmap` sequence (map runOne cbSamplers)
   where
-    runOne :: GroupSampler -> IO [(T.Text, Value)]
+    runOne :: GroupSampler -> IO [((T.Text, [T.Text]), Value)]
     runOne GroupSampler{..} = do
         a <- groupSampleAction
-        return $! map (\ (n, f) -> (n, f a)) (M.toList groupSamplerMetrics)
+        return $! map (\ (k, f) -> (k, f a)) (M.toList groupSamplerMetrics)
 
 -- | The value of a sampled metric.
 data Value = Counter {-# UNPACK #-} !Int64
@@ -551,9 +559,9 @@ sampleOne (DistributionS m) = Distribution <$> m
 
 -- | Get a snapshot of all values.  Note that we're not guaranteed to
 -- see a consistent snapshot of the whole map.
-readAllRefs :: M.HashMap T.Text (Either MetricSampler GroupId)
-            -> IO [(T.Text, Value)]
+readAllRefs :: M.HashMap (T.Text,[T.Text]) (Either MetricSampler GroupId)
+            -> IO [((T.Text,[T.Text]), Value)]
 readAllRefs m = do
-    forM ([(name, ref) | (name, Left ref) <- M.toList m]) $ \ (name, ref) -> do
+    forM ([(key, ref) | (key, Left ref) <- M.toList m]) $ \ (key, ref) -> do
         val <- sampleOne ref
-        return (name, val)
+        return (key, val)
