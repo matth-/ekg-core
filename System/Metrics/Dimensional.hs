@@ -49,13 +49,6 @@ data DimensionError =
                  !Point
   deriving (Show, Ord, Eq)
 
-instance Exception DimensionError
-
-data LookupFailure
-  = UnmatchedDimensions DimensionError
-  | NotFound
-  deriving (Show, Ord, Eq)
-
 -- | Returns dimensional metric with specified labels
 lookup :: Dimensional a -> Point -> IO (Either LookupFailure a)
 lookup d pt
